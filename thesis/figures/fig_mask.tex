@@ -1,0 +1,33 @@
+% Attention mask of masked joint attention: which tokens (rows) may read which tokens (columns).
+\begin{figure}[tb]
+\centering
+\begin{tikzpicture}[font=\small,>=Stealth]
+  \def\s{2.1}
+  % grid cells: rows (readers) top to bottom U,P,A ; columns (read) left to right U,P,A
+  \foreach \r/\rl in {0/understanding,1/perception,2/action}{
+    \node[anchor=east,font=\footnotesize] at (-0.15,{-(\r+0.5)*\s}) {\rl};
+    \foreach \c in {0,1,2}{
+      \draw[gray!60] ({\c*\s},{-\r*\s}) rectangle ({(\c+1)*\s},{-(\r+1)*\s});
+    }
+  }
+  \foreach \c/\cl in {0/understanding,1/perception,2/action}
+    \node[anchor=south,font=\footnotesize] at ({(\c+0.5)*\s},0.1) {\cl};
+  % allowed blocks
+  \fill[blue!35] (0,0) -- (0,-\s) -- (\s,-\s) -- cycle;             % U reads earlier U (causal)
+  \fill[blue!35] (0,-\s) rectangle (2*\s,-2*\s);                    % P reads U, P
+  \fill[blue!35] (0,-2*\s) rectangle (3*\s,-3*\s);                  % A reads U, P, A
+  \foreach \i in {1,2}{\draw[white,very thick] ({\i*\s},0) -- ({\i*\s},-3*\s); \draw[white,very thick] (0,{-\i*\s}) -- (3*\s,{-\i*\s});}
+  \foreach \i in {1,2}{\draw[gray!70] ({\i*\s},0) -- ({\i*\s},-3*\s); \draw[gray!70] (0,{-\i*\s}) -- (3*\s,{-\i*\s});}
+  \draw[thick] (0,0) rectangle (3*\s,-3*\s);
+  \node[font=\footnotesize,align=center] at ({1.5*\s},{-3*\s-0.55}) {key tokens (attended to)};
+  \node[font=\footnotesize,rotate=90,align=center] at (-2.4,{-1.5*\s}) {query tokens (attending)};
+  % legend
+  \fill[blue!35] (6.9,-1.2) rectangle (7.3,-0.8); \node[anchor=west,font=\footnotesize] at (7.4,-1.0) {may attend};
+  \draw[gray!60] (6.9,-2.0) rectangle (7.3,-1.6); \node[anchor=west,font=\footnotesize] at (7.4,-1.8) {may not attend};
+  \node[anchor=west,font=\footnotesize,align=left] at (6.9,-3.0) {triangle: each understanding\\token attends only to the\\understanding tokens before it};
+\end{tikzpicture}
+\caption[Attention mask of masked joint attention]{\textbf{Attention mask of masked joint
+attention}, applied in every layer. Each row shows which tokens the queries of one expert may
+attend to. The action expert attends to all tokens; no expert attends to the action tokens.}
+\label{fig:mask}
+\end{figure}

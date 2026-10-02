@@ -24,6 +24,34 @@ except:
 from flash_attn.bert_padding import unpad_input, pad_input, index_first_axis
 
 
+def _flash_attn_kernel_unsupported(device):
+    return torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] < 8
+
+
+def _sdpa_kvpacked_fallback(q, kv, key_padding_mask, causal, softmax_scale, dropout_p):
+    # q: (B, T, H, D); kv: (B, S, 2, H, D); key_padding_mask: bool (B, S), True=valid.
+    k, v = kv.unbind(dim=2)
+    q_ = q.transpose(1, 2)
+    k_ = k.transpose(1, 2)
+    v_ = v.transpose(1, 2)
+    attn_mask = key_padding_mask[:, None, None, :] if key_padding_mask is not None else None
+    if causal and attn_mask is not None:
+        T, S = q_.shape[-2], k_.shape[-2]
+        causal_mask = torch.ones(T, S, dtype=torch.bool, device=q.device).tril_()
+        attn_mask = attn_mask & causal_mask
+        is_causal = False
+    else:
+        is_causal = causal
+    out = torch.nn.functional.scaled_dot_product_attention(
+        q_, k_, v_,
+        attn_mask=attn_mask,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+        scale=softmax_scale,
+    )
+    return out.transpose(1, 2).contiguous()
+
+
 def _in_projection_packed(q, k, v, w, b = None):
     w_q, w_k, w_v = w.chunk(3)
     if b is None:
@@ -63,6 +91,13 @@ class FlashAttention(nn.Module):
         assert q.dtype in [torch.float16, torch.bfloat16] and kv.dtype in [torch.float16, torch.bfloat16]
         assert q.is_cuda and kv.is_cuda
         assert q.shape[0] == kv.shape[0] and q.shape[-2] == kv.shape[-2] and q.shape[-1] == kv.shape[-1]
+
+        if _flash_attn_kernel_unsupported(q.device):
+            output = _sdpa_kvpacked_fallback(
+                q, kv, key_padding_mask, causal, self.softmax_scale,
+                self.dropout_p if self.training else 0.0,
+            )
+            return output, None
 
         batch_size = q.shape[0]
         seqlen_q, seqlen_k = q.shape[1], kv.shape[1]
@@ -140,6 +175,8 @@ class FlashMHA(nn.Module):
         kv = torch.stack([k, v], dim=2)
         
         context, attn_weights = self.inner_attn(q, kv, key_padding_mask=key_padding_mask, causal=self.causal)
+        # @auto_fp16(out_fp32=True) on inner_attn returns fp32; out_proj weights are bf16.
+        context = context.to(self.out_proj.weight.dtype)
         return self.out_proj(rearrange(context, 'b s h d -> b s (h d)')), attn_weights
 
 

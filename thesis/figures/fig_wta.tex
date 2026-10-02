@@ -1,0 +1,67 @@
+% One training step of the mode embeddings (relaxed winner-takes-all).
+\begin{figure}[tb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize, >=Stealth,
+  box/.style={draw,rounded corners,align=center,minimum height=0.85cm,inner sep=2pt},
+  trn/.style={box,fill=red!8,draw=red!60!black},
+  frz/.style={box,fill=gray!12},
+  prt/.style={box,fill=red!8,draw=red!60!black,dashed},
+  pln/.style={box,fill=white},
+  flow/.style={->,semithick},
+]
+% shared inputs
+\node[pln,text width=2.9cm] (a)  at (0,-1.6) {recorded\\trajectory $\mathbf a$};
+\node[pln,text width=2.9cm] (et) at (0,-3.0) {noise $\boldsymbol\epsilon$, time $t$};
+\node[pln,text width=2.9cm] (xt) at (0,-4.6) {$\mathbf x_t=(1-t)\mathbf a+t\boldsymbol\epsilon$,\\same for all modes};
+\draw[flow] (et) -- (xt);
+\draw[flow] (a.west) -- ++(-0.3,0) |- (xt.west);
+% mode rows
+\foreach \n/\lab/\y in {0/0/-1.6, 1/1/-3.4, 2/N-1/-5.8}{
+  \node[trn,text width=2.1cm] (in\n) at (3.6,\y) {action tokens\\$+\,\mathbf M_{\lab}$};
+  \node[prt,text width=1.9cm] (ae\n) at (6.3,\y) {action expert};
+  \node[pln,text width=2.9cm] (l\n)  at (9.6,\y) {loss $\ell_{\lab}$:\\velocity error and\\position error};
+  \draw[flow] (xt.east) -- (in\n.west);
+  \draw[flow] (in\n) -- (ae\n);
+  \draw[flow] (ae\n) -- (l\n);
+}
+\node at (6.3,-4.6) {$\vdots$};
+\node at (9.6,-4.6) {$\vdots$};
+% column groups with their shared inputs
+\node[draw,dashed,gray,rounded corners,fit=(ae0)(ae2),inner sep=5pt] (gA) {};
+\node[draw,dashed,gray,rounded corners,fit=(l0)(l2),inner sep=5pt] (gL) {};
+\node[frz,text width=3.0cm] (sc) at (6.3,0.7) {scene tokens $s$,\\status tokens ($\mathbf h$, $c$)};
+\node[pln,text width=3.0cm] (tg) at (9.9,0.7) {targets: velocity $\mathbf u$,\\positions $\mathrm P(\mathbf a)$};
+\draw[flow] (sc) -- node[right,font=\scriptsize]{all runs} (gA.north);
+\draw[flow] (tg) -- node[right,font=\scriptsize]{all losses} (gL.north);
+% loss weights
+\node[pln,text width=2.3cm,minimum height=5.0cm] (mn) at (13.4,-3.7)
+  {loss weights\\[4pt]mode with the\\lowest loss:\\$1-\eta+\eta/N$\\[6pt]other modes:\\$\eta/N$};
+\foreach \n in {0,1,2}{\draw[flow] (l\n.east) -- (l\n.east -| mn.west);}
+% winner frame around row 1
+\draw[red!70!black,thick,rounded corners] ($(in1.north west)+(-0.15,0.18)$) rectangle ($(l1.south east)+(0.25,-0.22)$);
+\node[font=\scriptsize,text=red!70!black,anchor=north west] at ($(in1.south west)+(-0.15,-0.32)$) {winner: lowest loss};
+% inside the action expert
+\node[trn,text width=2.8cm] (d1) at (3.6,-8.2) {input layers: projection of $\mathbf x_t$, time embedding, status encoders};
+\node[frz,text width=1.9cm] (d2) at (6.8,-8.2) {transformer\\layers};
+\node[trn,text width=2.4cm] (d3) at (9.6,-8.2) {output layer:\\tokens $\to$ velocity};
+\draw[flow] (d1) -- (d2);
+\draw[flow] (d2) -- (d3);
+\draw[gray,densely dotted,thick] (gA.south west) -- (d1.north);
+\draw[gray,densely dotted,thick] (gA.south east) -- (d3.north);
+\node[font=\scriptsize,text=gray] at (6.8,-7.3) {inside the action expert};
+% legend
+\node[trn,text width=1.2cm,minimum height=0.45cm] (k1) at (12.8,-7.7) {trained};
+\node[frz,text width=1.2cm,minimum height=0.45cm] (k2) at (14.3,-7.7) {frozen};
+\node[prt,text width=2.8cm,minimum height=0.45cm] (k3) at (13.55,-8.55) {frozen except input and output layers};
+\end{tikzpicture}%
+}
+\caption[Training of the mode embeddings]{\textbf{Training of the mode embeddings.} For one
+recorded scene, the same noisy trajectory $\mathbf x_t$ is passed through the action expert once
+per mode, each time with a different mode embedding $\mathbf M_n$ added to the action tokens.
+Each run predicts a velocity, and its loss $\ell_n$ combines the error of this velocity and the
+error of the resulting positions (Equation~\eqref{eq:fmloss}). The mode with the lowest loss
+receives most of the update; the other modes receive a small share, set by $\eta=0.05$.}
+\label{fig:wta}
+\end{figure}

@@ -165,6 +165,27 @@ def compute_layer_complete(
             "dropout_p": 0.0,
             "is_causal": False,
         }
+        _seen = globals().setdefault("_DIAG_SDPA_LAYERS_SEEN", set())
+        if layer_idx not in _seen:
+            try:
+                _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            except Exception:
+                _rank = 0
+            if _rank == 0:
+                _q = tuple(query_states.shape)
+                _k = tuple(key_states.shape)
+                _v = tuple(value_states.shape)
+                _m = tuple(attention_mask.shape) if attention_mask is not None else None
+                _dtype = str(query_states.dtype)
+                # math-backend attn-probs tensor [B,H,Q,K]
+                _attn_bytes = _q[0] * _q[1] * _q[2] * _k[2] * (2 if query_states.dtype == torch.bfloat16 else 4)
+                _mb = lambda x: x / (1024 ** 2)
+                print(f"[diag/sdpa] L{layer_idx:02d} Q={_q} mask={_m} dtype={_dtype} "
+                      f"[B,H,Q,K]bf16={_mb(_attn_bytes):.0f}MiB "
+                      f"alloc={_mb(torch.cuda.memory_allocated()):.0f}MiB "
+                      f"reserved={_mb(torch.cuda.memory_reserved()):.0f}MiB "
+                      f"max_alloc={_mb(torch.cuda.max_memory_allocated()):.0f}MiB", flush=True)
+            _seen.add(layer_idx)
         try:
             att_output = F.scaled_dot_product_attention(
                 query_states,

@@ -1,0 +1,42 @@
+% Learned scorer: candidate encoder + cross-attention over perception tokens -> 9 EPDMS terms;
+% fixed EPDMS formula and argmax outside the learned part.
+\begin{figure}[htb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  box/.style={draw,rounded corners,align=center,minimum height=1.1cm,text width=2.6cm,inner sep=3pt},
+  inp/.style={box,fill=white},
+  lrn/.style={box,fill=red!8,draw=red!60!black},
+  fix/.style={box,fill=white,dashed,text width=3.0cm},
+  flow/.style={->,thick},
+]
+\node[inp] (tau) at (0,1.3)  {candidate $\tau^{(n)}$\\$6\times2$ positions};
+\node[inp] (phi) at (0,-1.3) {perception tokens\\$\boldsymbol\phi_s$, $T_s\times256$};
+\node[lrn] (enc) at (3.4,1.3)  {MLP\\$12\to128\to128$};
+\node[lrn] (prj) at (3.4,-1.3) {linear layer\\$256\to128$};
+\node[lrn] (att) at (6.9,0.0)  {cross-attention\\4 heads};
+\node[lrn] (hd)  at (10.3,0.0) {MLP, sigmoid\\$128\to128\to9$};
+\node[inp,text width=3.0cm] (g) at (14.0,0.0) {9 predicted terms\\$\hat{\mathbf g}^{(n)}\in[0,1]^9$};
+\node[fix] (rec) at (14.0,-2.8) {EPDMS formula\\$\hat s^{(n)}$ from $\hat{\mathbf g}^{(n)}$};
+\node[fix] (sel) at (10.3,-2.8) {selection\\$\hat n=\arg\max_n \hat s^{(n)}$};
+\draw[flow] (tau) -- (enc);
+\draw[flow] (phi) -- (prj);
+\draw[flow] (enc.east) -- node[above right=-1pt,font=\footnotesize]{query} ([yshift=3mm]att.west);
+\draw[flow] (prj.east) -- node[below right=-1pt,font=\footnotesize]{keys, values} ([yshift=-3mm]att.west);
+\draw[flow] (att) -- (hd);
+\draw[flow] (hd) -- (g);
+\draw[flow] (g) -- (rec);
+\draw[flow] (rec) -- (sel);
+\begin{scope}[on background layer]
+\node[draw=red!50!black,rounded corners,fit=(enc)(prj)(att)(hd),inner sep=7pt,
+      label={[font=\footnotesize]above:learned, trained on NAVSIM}] {};
+\end{scope}
+\end{tikzpicture}%
+}
+\caption[The learned scorer]{\textbf{The learned scorer.} For each candidate, an MLP encodes its six
+positions into a query that attends over the perception tokens. An MLP predicts the nine EPDMS
+terms from the result. The EPDMS formula combines them into one score, and the candidate with
+the highest score is selected. Only the parts inside the frame are learned.}
+\label{fig:scorer}
+\end{figure}

@@ -73,6 +73,33 @@ class PlanningMetric():
         self.obj_box_col = torch.zeros(self.n_future)
         self.L2 = torch.zeros(self.n_future)
         self.total = torch.tensor(0)
+        # minADE_k / minFDE_k over the N candidate trajectories (multi-mode eval).
+        self.minADE_sum = 0.0
+        self.minFDE_sum = 0.0
+        self.single_ADE_sum = 0.0   # mode-0 (the deployed single trajectory) ADE
+        self.mode_total = 0
+
+    def update_modes(self, traj_modes, gt_trajs, gt_trajs_mask):
+        """Accumulate minADE_k / minFDE_k over the N candidate ego trajectories.
+
+        traj_modes    : (N, T, 2) cumulative positions in metres (same frame as
+                        final_planning; traj_modes[0] is the deployed trajectory).
+        gt_trajs      : (1, T, 2) cumulative GT ; gt_trajs_mask : (1, T, 2).
+        No x-flip is needed: update() flips both pred and GT by the same sign, which
+        leaves the Euclidean L2 unchanged, so we compare in the raw frame.
+        """
+        tm = traj_modes[:, :, :2]                                   # (N, T, 2)
+        gt = gt_trajs[:, :, :2]                                     # (1, T, 2)
+        d = torch.sqrt((((tm - gt) ** 2) * gt_trajs_mask).sum(dim=-1))  # (N, T) per-step L2
+        valid = gt_trajs_mask[0, :, 0] > 0                          # (T,)
+        if not bool(valid.any()):
+            return
+        ade = d[:, valid].mean(dim=-1)                             # (N,)
+        fde = d[:, int(torch.nonzero(valid).max())]               # (N,) last valid step
+        self.minADE_sum += float(ade.min())
+        self.minFDE_sum += float(fde.min())
+        self.single_ADE_sum += float(ade[0])
+        self.mode_total += 1
 
     def evaluate_single_coll(self, traj, fut_boxes, safe_incomplete=False):
         n_future = traj.shape[0]
@@ -420,7 +447,13 @@ def planning_eval(results, eval_config, logger, seg_pkl_path=None):
     m_strict = PlanningMetric()
     m_loose  = PlanningMetricLoose() if occ_map is not None else None
 
+    # EVAL_MAX_SAMPLES>0 caps the eval to the first N val samples -- a fast subset
+    # estimate for the minADE_k convergence curve (the full 6019-sample val is slow
+    # with N-mode inference). 0 = full val.
+    _eval_max = int(os.environ.get("EVAL_MAX_SAMPLES", "0"))
     for i, data in enumerate(tqdm(dataloader)):
+        if _eval_max and i >= _eval_max:
+            break
         sdc_planning      = data['gt_ego_fut_trajs'].cumsum(dim=-2).unsqueeze(1)
         sdc_planning_mask = data['gt_ego_fut_masks'].unsqueeze(-1).repeat(1, 1, 2).unsqueeze(1)
         fut_boxes         = data['fut_boxes']
@@ -434,6 +467,11 @@ def planning_eval(results, eval_config, logger, seg_pkl_path=None):
         # ---- [SparseDrive STRICT] 3D-box, skip incomplete GT ----
         if sdc_planning_mask.all():
             m_strict.update(pred.clone(), gt_traj.clone(), gt_mask.clone(), fut_boxes)
+            # ---- multi-mode: minADE_k / minFDE_k over the N candidates (if present) ----
+            tm = res['img_bbox'].get('traj_modes')  # (N, T, 2) or None
+            if tm is not None:
+                tm_t = tm if torch.is_tensor(tm) else torch.as_tensor(tm)
+                m_strict.update_modes(tm_t[:, :6, :2].float(), gt_traj.clone(), gt_mask.clone())
 
         # ---- [GPT-Driver LOOSE] BEV-occupancy, all samples ----
         if m_loose is not None:
@@ -444,6 +482,21 @@ def planning_eval(results, eval_config, logger, seg_pkl_path=None):
 
     # ---- [SparseDrive STRICT] ----
     strict_results = m_strict.compute()
+    # Capture multi-mode metrics before reset() clears the accumulators.
+    _mode_metrics = {}
+    if m_strict.mode_total > 0:
+        _mode_metrics = {
+            'minADE_k':  m_strict.minADE_sum / m_strict.mode_total,
+            'minFDE_k':  m_strict.minFDE_sum / m_strict.mode_total,
+            'mode0_ADE': m_strict.single_ADE_sum / m_strict.mode_total,
+        }
+        print_log(
+            '[Multi-mode]  minADE_k={minADE_k:.4f}  minFDE_k={minFDE_k:.4f}  '
+            'mode0_ADE={mode0_ADE:.4f}  diversity_gap(mode0-min)={gap:.4f}  '
+            '({n} full-GT samples)'.format(
+                gap=_mode_metrics['mode0_ADE'] - _mode_metrics['minADE_k'],
+                n=m_strict.mode_total, **_mode_metrics),
+            logger=logger)
     _print_strict_format(
         strict_results, logger,
         'Planning Metrics  [SparseDrive — STRICT]  '
@@ -477,4 +530,5 @@ def planning_eval(results, eval_config, logger, seg_pkl_path=None):
             for k, v in strict_results.items()
         }
 
+    metric_dict.update(_mode_metrics)
     return metric_dict

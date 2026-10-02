@@ -200,7 +200,7 @@ def main():
         torch.cuda.set_device(mpi_local_rank % args.gpus_per_machine)
 
         dist.init_process_group(
-            backend="nccl",
+            backend=os.environ.get("DIST_BACKEND", "nccl"),
             init_method=args.dist_url,
             world_size=mpi_world_size,
             rank=mpi_local_rank,
@@ -211,9 +211,7 @@ def main():
         print("cfg.gpu_ids:", cfg.gpu_ids)
     else:
         distributed = True
-        init_dist(
-            args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params
-        )
+        init_dist(args.launcher, **cfg.dist_params)
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
@@ -264,6 +262,24 @@ def main():
         cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg")
     )
     model.init_weights()
+
+    # Optional head-only fine-tuning: if cfg.freeze_except is set (a list of name
+    # substrings), freeze every parameter whose name matches none of them. Done
+    # before the optimizer/engine is built so only trainable params are optimised.
+    freeze_except = cfg.get("freeze_except", None)
+    if freeze_except:
+        kept = frozen = 0
+        for name, p in model.named_parameters():
+            if any(tok in name for tok in freeze_except):
+                p.requires_grad = True
+                kept += p.numel()
+            else:
+                p.requires_grad_(False)
+                frozen += p.numel()
+        logger.info(
+            f"[freeze_except={freeze_except}] trainable={kept/1e6:.3f}M  frozen={frozen/1e6:.1f}M"
+        )
+
     logger.info(f"Model:\n{model}")
 
     cfg.data.train.work_dir = cfg.work_dir

@@ -1,0 +1,43 @@
+slurm*
+drivor.md
+.dist_test
+supervisor*.md
+
+# Compiled extensions and build artifacts
+# (upstream accidentally committed these from their own machine)
+*.so
+*.o
+*.egg-info/
+build/
+__pycache__/
+*.py[cod]
+.ninja_deps
+.ninja_log
+nuScenes/data
+nuScenes/vis/
+
+# Training / evaluation outputs
+work_dirs/
+nuScenes/projects/work_dirs/
+# test.py default --out=output/results.pkl (predictions, results_pred_trajs.pkl)
+output/
+nuScenes/results*.pkl
+
+# Model weights / checkpoints (downloaded externally)
+checkpoints/
+
+# Runtime logs
+*.log
+
+# Jupyter / editor / OS cruft
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+thesis_save_from_gcp/
+thesis_save.tgz
+
+# Local-only material (peer theses, papers, presentation, internal notes)
+private/

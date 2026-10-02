@@ -3,6 +3,7 @@
 # ---------------------------------------------
 #  Modified by Zhiqi Li
 # ---------------------------------------------
+import os
 import os.path as osp
 import pickle
 import shutil
@@ -46,32 +47,85 @@ def custom_encode_mask_results(mask_results):
     return [encoded_mask_results]
 
 
-def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
+def _atomic_dump(obj, path):
+    """Write via a tmp file + os.replace so a kill mid-write cannot corrupt the state."""
+    tmp = path + ".tmp"
+    # Pin format; mmcv would otherwise sniff the '.tmp' suffix and reject the write.
+    mmcv.dump(obj, tmp, file_format='pkl')
+    os.replace(tmp, path)
+
+
+def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False,
+                          resume_dir=None, save_every=25):
     """Test model with multiple gpus.
     This method tests model with multiple gpus and collects the results
     under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
     it encodes results to gpu tensors and use gpu communication for results
     collection. On cpu mode it saves the results on different gpus to 'tmpdir'
     and collects them by the rank 0 worker.
+
+    If resume_dir is given, each rank writes its partial results to
+    {resume_dir}/rank_{rank}.pkl every save_every samples and, on startup,
+    reloads them and skips samples it has already processed. On a clean
+    finish the directory is wiped by rank 0.
+
     Args:
         model (nn.Module): Model to be tested.
         data_loader (nn.Dataloader): Pytorch data loader.
         tmpdir (str): Path of directory to save the temporary results from
             different gpus under cpu mode.
         gpu_collect (bool): Option to use either gpu or cpu to collect results.
+        resume_dir (str, optional): Stable directory for per-rank resume state.
+        save_every (int): Number of samples between resume-state writes.
     Returns:
         list: The prediction results.
     """
     model.eval()
     bbox_results = []
     mask_results = []
+    have_mask = False
+    processed = 0  # rank-local count of samples already forwarded
     dataset = data_loader.dataset
     rank, world_size = get_dist_info()
+
+    resume_path = None
+    if resume_dir is not None:
+        if rank == 0:
+            mmcv.mkdir_or_exist(resume_dir)
+        if world_size > 1:
+            dist.barrier()
+        resume_path = osp.join(resume_dir, f"rank_{rank}.pkl")
+        if osp.exists(resume_path):
+            saved = mmcv.load(resume_path)
+            bbox_results = list(saved.get("bbox_results", []))
+            mask_results = list(saved.get("mask_results", []))
+            have_mask = bool(saved.get("have_mask", False))
+            processed = int(saved.get("processed", len(bbox_results)))
+            print(f"[rank {rank}] resume: loaded {processed} samples from {resume_path}")
+
+    # DDP deadlocks if ranks run different numbers of forward steps;
+    # trim every rank back to the slowest's count and re-run the overlap.
+    if world_size > 1 and resume_dir is not None:
+        processed_t = torch.tensor([processed], dtype=torch.int64, device="cuda")
+        dist.all_reduce(processed_t, op=dist.ReduceOp.MIN)
+        min_processed = int(processed_t.item())
+        if min_processed < processed:
+            print(f"[rank {rank}] resume: trimming {processed - min_processed} "
+                  f"samples to match slowest rank ({min_processed})")
+            bbox_results = bbox_results[:min_processed]
+            mask_results = mask_results[:min_processed]
+            processed = min_processed
+
     if rank == 0:
         prog_bar = mmcv.ProgressBar(len(dataset))
+        for _ in range(processed * world_size):
+            prog_bar.update()
+
     time.sleep(2)  # This line can prevent deadlock problem in some cases.
-    have_mask = False
+
     for i, data in enumerate(data_loader):
+        if i < processed:
+            continue
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
             # encode mask results
@@ -93,9 +147,28 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
                 batch_size = len(result)
                 bbox_results.extend(result)
 
+        processed += 1
+
+        if resume_path is not None and processed % save_every == 0:
+            _atomic_dump({
+                "bbox_results": bbox_results,
+                "mask_results": mask_results,
+                "have_mask": have_mask,
+                "processed": processed,
+            }, resume_path)
+
         if rank == 0:
             for _ in range(batch_size * world_size):
                 prog_bar.update()
+
+    # Final flush; survives a downstream collect failure.
+    if resume_path is not None:
+        _atomic_dump({
+            "bbox_results": bbox_results,
+            "mask_results": mask_results,
+            "have_mask": have_mask,
+            "processed": processed,
+        }, resume_path)
 
     # collect results from all ranks
     if gpu_collect:
@@ -113,6 +186,9 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             )
         else:
             mask_results = None
+
+    if resume_dir is not None and rank == 0:
+        shutil.rmtree(resume_dir, ignore_errors=True)
 
     if mask_results is None:
         return bbox_results

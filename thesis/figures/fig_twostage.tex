@@ -1,0 +1,58 @@
+% NAVSIM v2 two-stage scoring, bird's-eye sketches (x forward to the right).
+\begin{figure}[tb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,>=Stealth,x=0.36cm,y=0.36cm]
+  % ---------------- (a) stage 1 ----------------
+  \begin{scope}
+    \node[anchor=west,font=\small\bfseries] at (-1.5,6.2) {(a) Stage 1: recorded scene, start at \SI{0}{\second}};
+    \fill[gray!12] (-1.5,-4) rectangle (20,4);
+    \draw[gray!60,dashed] (-1.5,0) -- (20,0);
+    \draw[fill=white,thick] (-0.9,-0.5) rectangle (0.9,0.5);
+    \node[anchor=north] at (0,-0.7) {ego};
+    % recorded human future
+    \draw[black!60,thick,dashed,->] (0.9,-0.1) -- (12.6,-0.6);
+    \node[star,star points=5,fill=black,inner sep=1.4pt] at (13,-0.6) {};
+    \node[anchor=north,align=center] at (13,-1.0) {human driver\\after \SI{4}{\second}};
+    % planner trajectory
+    \draw[blue!70!black,very thick,->] (0.9,0.1) .. controls (5,0.3) and (8,1.0) .. (11.3,1.8);
+    \fill[blue!70!black] (11.5,1.85) circle (4pt);
+    \node[blue!70!black,anchor=south] at (11.5,2.1) {end $\hat x$};
+    \node[blue!70!black,anchor=south] at (5.2,1.2) {planner trajectory $\tau$};
+    \node[anchor=north west,align=left] at (-1.5,-4.4) {score $m(\tau,s)$ of the planner\\trajectory $\tau$};
+  \end{scope}
+  % ---------------- (b) stage 2 ----------------
+  \begin{scope}[xshift=8.6cm]
+    \node[anchor=west,font=\small\bfseries] at (-1.5,6.2) {(b) Stage 2: synthetic scenes, start at \SI{4}{\second}};
+    \fill[gray!12] (-1.5,-4) rectangle (20,4);
+    \draw[gray!60,dashed] (-1.5,0) -- (20,0);
+    % reference points carried over
+    \node[star,star points=5,fill=black,inner sep=1.4pt] at (3,-0.6) {};
+    \fill[blue!70!black] (1.5,1.85) circle (4pt);
+    \node[blue!70!black,anchor=south east] at (1.4,1.9) {$\hat x$};
+    % synthetic start positions around the human position
+    \foreach \px/\py/\op in {3.3/3.1/0.85, 1.0/-2.6/0.35, 5.2/-2.8/0.15, 5.4/2.0/0.5, 4.2/0.7/0.6}{
+      \draw[orange!85!black,fill=orange!85!black,fill opacity=\op,thick] (\px,\py) circle (6pt);
+      \draw[orange!85!black,thick,->] (\px+0.45,\py) -- (\px+6.5,\py+0.15);
+    }
+    \draw[blue!70!black,densely dotted,thick] (1.5,1.85) -- (3.3,3.1);
+    \draw[blue!70!black,densely dotted,thick] (1.5,1.85) -- (5.2,-2.8);
+    \node[orange!85!black,anchor=north west,align=left] at (-1.5,-4.4) {start positions $x_j$ around the human driver,\\trajectories $\tau_j$, scores $m(\tau_j,s_j)$};
+    \node[blue!70!black,anchor=north west,align=left] at (-1.5,-6.6) {dotted: distance from $x_j$ to $\hat x$,\\which sets the weight $\omega_j$};
+  \end{scope}
+  % ---------------- combination and legend ----------------
+  \node[draw,rounded corners,fill=white,align=center,font=\small,anchor=north] at (31,-9.6)
+    {$\displaystyle \mathrm{EPDMS}(s)=m(\tau,s)\cdot\frac{\sum_j\omega_j\,m(\tau_j,s_j)}{\sum_j\omega_j}$};
+  \node[star,star points=5,fill=black,inner sep=1.4pt] at (-1,-10.2) {};
+  \node[anchor=west] at (-0.4,-10.2) {recorded position of the human driver after \SI{4}{\second}};
+  \fill[blue!70!black] (-1,-11.5) circle (4pt); \node[anchor=west] at (-0.4,-11.5) {end $\hat x$ of the planner's stage-1 trajectory};
+  \draw[orange!85!black,fill=orange!85!black,fill opacity=0.9,thick] (-1,-12.8) circle (6pt);
+  \draw[orange!85!black,fill=orange!85!black,fill opacity=0.15,thick] (0.2,-12.8) circle (6pt);
+  \node[anchor=west] at (0.8,-12.8) {start position with high / low weight};
+\end{tikzpicture}%
+}
+\caption[Two-stage scoring in NAVSIM v2]{\textbf{Two-stage scoring in NAVSIM v2.} (a) First
+stage from the recorded scene. (b) Second stage from synthetic start positions, weighted by
+their distance to $\hat x$ (Section~\ref{sec:epdms}).}
+\label{fig:twostage}
+\end{figure}

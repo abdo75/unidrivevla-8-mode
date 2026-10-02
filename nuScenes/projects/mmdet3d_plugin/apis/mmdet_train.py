@@ -37,6 +37,34 @@ from .util_distribution import build_dp, build_ddp, build_ZeROddp
 import json
 from torch.optim import AdamW
 
+
+def _resume_with_trusted_load(runner, *args, **kwargs):
+    """Resume a checkpoint that DeepSpeed wrote, under torch-2.7.
+
+    torch-2.7 flipped torch.load's default to weights_only=True, which refuses
+    the pickled non-tensor objects DeepSpeed stores in its optimizer-state files
+    (e.g. deepspeed.runtime.fp16.loss_scaler.LossScaler in
+    bf16_zero_pp_rank_*_optim_states.pt). Resume then dies before the first
+    iteration, so a multi-day run on a shared GPU could not survive a preemption.
+
+    These checkpoints are produced by our OWN training run and are trusted, so we
+    load them with weights_only=False — scoped to this resume call only (we restore
+    torch.load in the finally). load_from / model_states are pure tensors and load
+    fine under the secure default, so they are unaffected and are left untouched.
+    """
+    _orig_torch_load = torch.load
+
+    def _trusted_load(*a, **k):
+        k.setdefault("weights_only", False)  # trusted self-produced ckpt; see docstring
+        return _orig_torch_load(*a, **k)
+
+    torch.load = _trusted_load
+    try:
+        return runner.resume(*args, **kwargs)
+    finally:
+        torch.load = _orig_torch_load
+
+
 def find_latest_checkpoint(work_dir, extension="pth"):
     if not os.path.exists(work_dir): return None
     latest_link = os.path.join(work_dir, 'latest')
@@ -530,9 +558,9 @@ def custom_train_detector(
                 ds_load_dir = resume_path
                 ds_tag = None
             logger.info(f"[Resume] DeepSpeed load_dir={ds_load_dir}, tag={ds_tag}")
-            runner.resume(ds_load_dir, tag=ds_tag)
+            _resume_with_trusted_load(runner, ds_load_dir, tag=ds_tag)
         else:
-            runner.resume(cfg.resume_from)
+            _resume_with_trusted_load(runner, cfg.resume_from)
 
     elif cfg.load_from and not deepspeed_enabled:
         # DeepSpeed 的 load_from 在上面已经手动处理过了，这里跳过

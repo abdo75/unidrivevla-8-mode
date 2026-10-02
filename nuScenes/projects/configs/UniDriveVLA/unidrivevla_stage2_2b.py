@@ -24,17 +24,17 @@ load_from = stage1_checkpoint
 # [Enhance] Update some freezing args of UniAD
 plugin = True
 plugin_dir = "projects/mmdet3d_plugin/"
-version = 'trainval'
+version = os.environ.get("NUSC_VERSION", "trainval")  # 'trainval' or 'mini'
 length = {'trainval': 28130, 'mini': 323}
 
 dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 total_batch_size = 128
-batch_size = 4
+batch_size = 1
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 15
-total_epochs = 15
+num_epochs = 1
+total_epochs = 1
 checkpoint_epoch_interval = 1
 
 checkpoint_config = dict(
@@ -497,6 +497,7 @@ model = dict(
         vlm_fusion_cfg=dict(type='direct'),
         feature_fusion_cfg=dict(type='none'),
         inference_attn_impl="sdpa",
+        visual_attn_impl="sdpa",
     ),
     task_loss_weight=dict(planning=1.0),
 )
@@ -641,7 +642,7 @@ data_basic_config = dict(
     classes=class_names,
     map_classes=map_class_names,
     modality=input_modality,
-    version="v1.0-trainval",
+    version=("v1.0-mini" if version == "mini" else "v1.0-trainval"),
 )
 
 eval_config = dict(
@@ -736,10 +737,20 @@ runner = dict(
 )
 
 eval_mode = dict(
+    # Deliverables are detection + planning. The three optional heads below are
+    # hardcoded OFF so a plain `tools/test.py --eval bbox` run completes without
+    # env flags. Flip a line to True in-place for a capable ckpt / small split.
     with_det=True,
-    with_tracking=True,
-    with_map=True,
-    with_motion=True,
+    # tracking + motion run BEFORE planning in evaluate(), so either erroring
+    # blocks the planning deliverable: tracking eval crashes on v1.0-mini's empty
+    # pandas MultiIndex (flaky on newer pandas), and motion needs the motion_*
+    # weights the released Stage-2 ckpt omits.
+    with_tracking=False,
+    with_motion=False,
+    # Map eval uses Pool(N_WORKERS=1) over ~6019 samples * 3 Chamfer categories —
+    # IPC-bottlenecked, hangs for many hours on trainval, and is not a
+    # deliverable. OFF so full-val eval doesn't wedge here before planning runs.
+    with_map=False,
     with_planning=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,

@@ -27,8 +27,7 @@ else:
     flex_attention = None
 
 
-@torch.compile(mode="max-autotune-no-cudagraphs")
-def compiled_flex_attention_wrapper(
+def _flex_attention_impl(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -43,6 +42,33 @@ def compiled_flex_attention_wrapper(
         scale=scale,
         enable_gqa=True
     )
+
+
+_compiled_flex_attention = None
+
+
+def compiled_flex_attention_wrapper(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_mask,
+    scale: float,
+):
+    # Lazy torch.compile, deferred from import time. On torch 2.7 in this env the
+    # compile ITSELF crashes inside inductor's get_compiler_config() with
+    # "TypeError: 'function' object is not iterable" while collecting torch.ops
+    # namespaces (the deferral only moved the crash from import to first call).
+    # So: try to compile once; if that throws, fall back to EAGER flex_attention
+    # (identical semantics, slower). The choice is cached either way.
+    global _compiled_flex_attention
+    if _compiled_flex_attention is None:
+        try:
+            _compiled_flex_attention = torch.compile(
+                _flex_attention_impl, mode="max-autotune-no-cudagraphs"
+            )
+        except Exception:
+            _compiled_flex_attention = _flex_attention_impl
+    return _compiled_flex_attention(query, key, value, block_mask, scale)
 
 
 def _unidrive_mask_mod(
@@ -85,7 +111,7 @@ def build_blockmask_unidrive(
     suffix_len: int,
     device: torch.device,
     block_size: int = 128,
-    compile_blockmask: bool = True,
+    compile_blockmask: bool = False,  # torch-2.7 torch.compile is broken here (inductor op-namespace bug); build eagerly
     prompt_only_len: int = -1,
 ):
     if create_block_mask is None:

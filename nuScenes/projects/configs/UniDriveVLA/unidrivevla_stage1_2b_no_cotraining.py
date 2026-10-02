@@ -18,17 +18,17 @@ num_gpus = int(os.environ.get("NUM_GPUS", 32))
 # [Enhance] Update some freezing args of UniAD
 plugin = True
 plugin_dir = "projects/mmdet3d_plugin/"
-version = 'trainval'
+version = os.environ.get("NUSC_VERSION", "trainval")  # 'trainval' or 'mini'
 length = {'trainval': 28130, 'mini': 323}
 
 dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 total_batch_size = 128
-batch_size = 4
+batch_size = 1
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 30
-total_epochs = 30
+num_epochs = 1
+total_epochs = 1
 checkpoint_epoch_interval = 1
 
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
@@ -446,6 +446,8 @@ model = dict(
         driving_deepstack=True,
         vlm_fusion_cfg=dict(type='direct'),
         feature_fusion_cfg=dict(type='none'),
+        visual_attn_impl="sdpa",
+        attn_implementation="sdpa",
     ),
     task_loss_weight=dict(planning=1.0),
 )
@@ -590,7 +592,7 @@ data_basic_config = dict(
     classes=class_names,
     map_classes=map_class_names,
     modality=input_modality,
-    version="v1.0-trainval",
+    version=("v1.0-mini" if version == "mini" else "v1.0-trainval"),
 )
 
 eval_config = dict(

@@ -58,6 +58,17 @@ def parse_args():
         '--tmpdir',
         help='tmp directory used for collecting results from multiple '
         'workers, available when gpu-collect is not specified')
+    parser.add_argument(
+        '--resume-dir',
+        default=None,
+        help='stable directory for per-rank partial results. If set, each '
+        'rank writes a checkpoint every --save-every samples and reloads '
+        'it on next launch so a SLURM timeout does not lose progress.')
+    parser.add_argument(
+        '--save-every',
+        type=int,
+        default=25,
+        help='checkpoint cadence for --resume-dir (samples per rank).')
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument(
         '--deterministic',
@@ -229,7 +240,9 @@ def main():
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
         outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
-                                        args.gpu_collect)
+                                        args.gpu_collect,
+                                        resume_dir=args.resume_dir,
+                                        save_every=args.save_every)
 
     rank, _ = get_dist_info()
     if rank == 0:

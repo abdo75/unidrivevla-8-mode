@@ -1,0 +1,63 @@
+% System overview: inputs -> three experts with masked joint attention -> N candidates
+% (one run of the action expert per mode embedding) -> scorer -> selection -> conversion.
+\begin{figure}[tb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  box/.style={draw,rounded corners,align=center,minimum height=1.0cm,text width=2.7cm,inner sep=3pt},
+  frozen/.style={box,fill=gray!12},
+  trained/.style={box,fill=red!8,draw=red!60!black,thick},
+  part/.style={box,fill=red!8,draw=red!60!black,thick,dashed},
+  plain/.style={box,fill=white},
+  flow/.style={->,thick},
+]
+% inputs
+\node[plain] (cam)   at (0,3.7)  {camera images,\\calibration $P'_v$};
+\node[plain] (ego)   at (0,1.2)  {ego history $\mathbf h$,\\command $c$};
+\node[plain] (noise) at (0,-0.3) {Gaussian noise $\mathbf x_1$,\\same for all modes};
+\node[trained] (M)   at (0,-2.1) {mode\\embedding $\mathbf M_n$};
+% experts
+\node[frozen] (U) at (3.6,4.4) {\textbf{understanding}\\\textbf{expert}\\Qwen3-VL-2B};
+\node[frozen] (P) at (3.6,2.6) {\textbf{perception}\\\textbf{expert}\\SparseDrive};
+\node[part,minimum height=1.6cm] (A) at (3.6,0.2) {\textbf{action expert}\\(flow matching)};
+\draw[flow] (cam.east) -- (U.west);
+\draw[flow] (cam.east) -- (P.west);
+\draw[flow] (ego.east) -- ([yshift=4mm]A.west);
+\draw[flow] (noise.east) -- ([yshift=-1mm]A.west);
+\draw[flow,red!60!black] (M.east) -- ([yshift=-6mm]A.west);
+% denoising loop
+\draw[->,thick] ([xshift=6mm]A.south) .. controls +(0.4,-1.1) and +(-0.4,-1.1) .. ([xshift=-6mm]A.south);
+\node[font=\footnotesize,anchor=west] at ([xshift=9mm,yshift=-7mm]A.south) {$K=10$ steps};
+% joint attention
+\node[draw,rounded corners,fill=black!80,text=white,align=center,text width=1.7cm,
+      minimum height=5.2cm] (J) at (6.9,2.3) {\textbf{masked}\\\textbf{joint}\\\textbf{attention}\\[3pt]every layer};
+\draw[<->,thick] (U.east) -- (U.east -| J.west);
+\draw[<->,thick] (P.east) -- (P.east -| J.west);
+\draw[<->,thick] (A.east) -- (A.east -| J.west);
+% outputs
+\node[frozen] (phi)  at (10.0,3.6) {perception\\tokens $\boldsymbol\phi_s$};
+\node[plain]  (traj) at (10.0,0.2) {$N$ candidates\\$\tau^{(n)}$, one per mode};
+\draw[flow] (J.east |- phi) -- (phi.west);
+\draw[flow] (J.east |- traj) -- (traj.west);
+\node[trained] (sc)  at (13.4,1.9) {\textbf{learned scorer}};
+\draw[flow] (phi.east) -- (sc.north west);
+\draw[flow] (traj.east) -- (sc.south west);
+\node[plain] (sel)  at (13.4,0.0) {selected candidate\\$\tau^{(\hat n)}$};
+\node[plain] (conv) at (13.4,-1.7) {NAVSIM poses};
+\draw[flow] (sc) -- node[right,font=\footnotesize]{$\arg\max$} (sel);
+\draw[flow] (sel) -- node[right,font=\footnotesize]{conversion} (conv);
+% legend
+\node[frozen,text width=1.4cm,minimum height=0.6cm]  (l1) at (2.2,-3.3) {frozen};
+\node[trained,text width=1.4cm,minimum height=0.6cm,right=0.4cm of l1] (l2) {trained};
+\node[part,text width=4.6cm,minimum height=0.6cm,right=0.4cm of l2] (l3) {frozen except input and output layers};
+\node[plain,text width=2.6cm,minimum height=0.6cm,right=0.4cm of l3] (l4) {input or result};
+\end{tikzpicture}%
+}
+\caption[System overview]{\textbf{System overview.} The understanding and perception experts read
+the camera images once per scene. The action expert turns Gaussian noise into a trajectory in
+$K=10$ steps and is run once for each of the $N$ mode embeddings. The three experts exchange
+information through masked joint attention. The learned scorer selects one candidate using the
+perception tokens, and the selected candidate is converted to NAVSIM poses.}
+\label{fig:framework}
+\end{figure}

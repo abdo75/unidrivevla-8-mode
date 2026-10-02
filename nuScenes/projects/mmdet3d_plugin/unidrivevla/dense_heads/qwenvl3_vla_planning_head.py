@@ -134,6 +134,9 @@ class QwenVL3APlanningHead(nn.Module):
         vlm_variant: Literal["2b", "8b"] = "2b",
         action_dim: int = 2,
         action_horizon: int = 6,
+        num_modes: int = 1,
+        mode_eps_share: float = 0.0,
+        mode_init_std: float = 0.02,
         dtype: Literal["bfloat16", "float32"] = "bfloat16",
         time_beta_alpha: float = 1.5,
         time_beta_beta: float = 1.0,
@@ -161,6 +164,7 @@ class QwenVL3APlanningHead(nn.Module):
         occ_aux_layers_1based: Optional[List[int]] = None,
         attn_implementation: Literal["eager", "sdpa", "flex"] = "flex",
         inference_attn_impl: Literal["eager", "sdpa"] = "eager",
+        visual_attn_impl: Literal["flash_attention_2", "sdpa", "eager"] = "flash_attention_2",
         unified_decoder_cfg: dict = None,
         occworld_vae_config: Optional[dict] = None,
         occworld_vae_path: Optional[str] = None,
@@ -183,6 +187,11 @@ class QwenVL3APlanningHead(nn.Module):
         super().__init__()
         self.action_dim = action_dim
         self.action_horizon = action_horizon
+        self.num_modes = num_modes
+        # WTA epsilon-share: fraction of the planning loss given to the MEAN over all
+        # modes (vs. the per-sample winner). 0.0 = pure winner-take-all; a small value
+        # (e.g. 0.05) keeps every mode receiving some gradient so none go dead.
+        self.mode_eps_share = mode_eps_share
         self.time_beta_alpha = time_beta_alpha
         self.time_beta_beta = time_beta_beta
         self.min_period = min_period
@@ -193,6 +202,7 @@ class QwenVL3APlanningHead(nn.Module):
             "enable_knowledge_insulation=True requires enable_traj_ar=True"
         self.enable_knowledge_insulation = enable_knowledge_insulation
         self._inference_attn_impl = inference_attn_impl
+        self._visual_attn_impl = visual_attn_impl
         self.ar_loss_weight = ar_loss_weight
         self.train_vlm = train_vlm
         self.enable_traj_ar = enable_traj_ar
@@ -353,6 +363,15 @@ class QwenVL3APlanningHead(nn.Module):
         self.action_in_proj = nn.Linear(action_dim, action_expert_cfg.hidden_size)
         self.action_out_proj = nn.Linear(action_expert_cfg.hidden_size, action_dim)
 
+        # Increment 2: per-mode learned query embedding. Added onto the action-time
+        # tokens in embed_suffix so each mode produces a distinct candidate trajectory
+        # (winner-take-all training makes them specialize). When num_modes == 1 this is
+        # a strict no-op (never constructed, never added) so the released Stage-2
+        # checkpoint — which has no mode_query weights — loads unchanged.
+        if self.num_modes > 1:
+            self.mode_query = nn.Embedding(self.num_modes, action_expert_cfg.hidden_size)
+            nn.init.normal_(self.mode_query.weight, mean=0.0, std=mode_init_std)
+
         status_in_features = 3 + self.ego_status_dim
 
         self.status_mlp = Mlp(
@@ -418,9 +437,18 @@ class QwenVL3APlanningHead(nn.Module):
         self._cached_block_mask_key = None
         self._cached_q_len_rounded = None
 
-        self.adaptive_feature_fusion = torch.compile(
-            self.adaptive_feature_fusion, mode="default", fullgraph=False, dynamic=True
-        )
+        try:
+            self.adaptive_feature_fusion = torch.compile(
+                self.adaptive_feature_fusion, mode="default", fullgraph=False, dynamic=True
+            )
+        except Exception as _compile_err:
+            # torch 2.7's inductor get_compiler_config() crashes while collecting
+            # torch.ops namespaces registered by mmcv/mmdet3d/flash_attn
+            # ("TypeError: 'function' object is not iterable"). torch.compile is a
+            # perf optimization, not required for correctness — fall back to the
+            # uncompiled module so the model builds on torch 2.7 / Blackwell.
+            print(f"[unidrivevla] torch.compile(adaptive_feature_fusion) disabled: "
+                  f"{type(_compile_err).__name__}: {_compile_err}", flush=True)
 
     def _get_view_token_ids(self, device):
         if self.view_token_ids is None:
@@ -1025,6 +1053,7 @@ class QwenVL3APlanningHead(nn.Module):
         ego_status_pred: Optional[torch.Tensor] = None,
         use_gt_status: bool = False,
         hist_traj: Optional[torch.Tensor] = None,
+        mode_idx: Optional[torch.Tensor] = None,
     ):
         device = actions.device
         dtype = self.qwen3_vl_with_expert.qwen3_vl.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -1060,6 +1089,14 @@ class QwenVL3APlanningHead(nn.Module):
             return self.action_time_mlp_out(x)
 
         action_time_emb = self._apply_checkpoint(mlp_func, fused_input)
+        # Increment 2: condition the action-time tokens on a per-mode learned embedding.
+        # Added to the action tokens ONLY (not the status/hist tokens), so the mode
+        # influences the predicted trajectory while leaving scene/ego context intact.
+        # mode_idx: LongTensor (B,). num_modes == 1 (no mode_query) is a strict no-op.
+        if self.num_modes > 1 and mode_idx is not None:
+            mode_emb = self.mode_query(mode_idx.to(device=device)).to(dtype)  # (B, H)
+            action_time_emb = action_time_emb + mode_emb.unsqueeze(1)         # broadcast over action tokens
+
         suffix_emb = torch.cat([status_emb, action_time_emb], dim=1)
 
         suffix_len = suffix_emb.shape[1]
@@ -1152,7 +1189,7 @@ class QwenVL3APlanningHead(nn.Module):
         x_t = t * noise + (1 - t) * actions
         u_t = noise - actions
 
-        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = "flash_attention_2"
+        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = self._visual_attn_impl
 
         prefix_embs, prefix_pad_masks, prefix_att_masks, all_image_grids, prefix_input_ids, deepstack_features, raw_features, prompt_only_len = self.embed_prefix(batch)
 
@@ -1244,7 +1281,11 @@ class QwenVL3APlanningHead(nn.Module):
                     perception_len=perception_len,
                     suffix_len=suffix_len,
                     device=actions.device,
-                    compile_blockmask=True,
+                    # torch.compile is broken in this torch-2.7 env (inductor
+                    # op-namespace bug: "'function' object is not iterable"), so
+                    # build the flex-attention block mask eagerly. It is cached
+                    # (_cached_block_mask), so the cost is negligible.
+                    compile_blockmask=False,
                     prompt_only_len=_prompt_only_len_key,
                 )
                 self._cached_block_mask = block_mask
@@ -1266,6 +1307,7 @@ class QwenVL3APlanningHead(nn.Module):
 
         stats = {}
         perception_out = None
+        suffix_out_per_mode = None  # set to a list of per-mode suffix_out in the monolithic branch
 
         if self.enable_knowledge_insulation:
             self.qwen3_vl_with_expert.qwen3_vl.language_model.config._attn_implementation = "sdpa"
@@ -1373,6 +1415,32 @@ class QwenVL3APlanningHead(nn.Module):
                 )
                 return outputs, middle_layer_outputs
 
+            if not getattr(QwenVL3APlanningHead, "_diag_seq_printed", False):
+                try:
+                    _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                except Exception:
+                    _rank = 0
+                if _rank == 0:
+                    _B = prefix_embs.shape[0]
+                    _pre = prefix_embs.shape[1]
+                    _per = perception_embs.shape[1]
+                    _suf = suffix_embs.shape[1]
+                    _tot = _pre + _per + _suf
+                    _heads = self.qwen3_vl_with_expert.qwen3_vl.config.text_config.num_attention_heads
+                    _hdim = self.qwen3_vl_with_expert.qwen3_vl.config.text_config.head_dim
+                    _attn_bytes = _B * _heads * _tot * _tot * 2  # bf16 [B,H,Q,K] math-backend tensor
+                    _mb = lambda x: x / (1024 ** 2)
+                    print(f"[diag/seq] bsz={_B} prefix_len={_pre} perception_len={_per} suffix_len={_suf} total={_tot} "
+                          f"perc_breakdown=det={det_len} map={map_len} occ={occ_len} ego={ego_len} motion={motion_len}",
+                          flush=True)
+                    print(f"[diag/seq] heads={_heads} head_dim={_hdim} attn_mask_shape={tuple(att_mask_input.shape) if att_mask_input is not None else None} "
+                          f"predicted [B,H,Q,K] bf16 = {_mb(_attn_bytes):.1f} MiB",
+                          flush=True)
+                    print(f"[diag/seq] cuda allocated={_mb(torch.cuda.memory_allocated()):.1f} MiB "
+                          f"reserved={_mb(torch.cuda.memory_reserved()):.1f} MiB",
+                          flush=True)
+                QwenVL3APlanningHead._diag_seq_printed = True
+
             (outputs_embeds, _middle_layer_outs_unused) = self._apply_checkpoint(
                 forward_func,
                 prefix_embs,
@@ -1386,6 +1454,39 @@ class QwenVL3APlanningHead(nn.Module):
                 _visual_pos_masks,
             )
             prefix_out, perception_out, suffix_out = outputs_embeds
+
+            # Increment 2 (mode-conditioned WTA): the forward above used the base
+            # suffix (no mode embedding) and gives the mode-invariant prefix_out /
+            # perception_out used by the frozen perception losses. For num_modes > 1
+            # we now run the transformer once per mode, rebuilding ONLY the suffix with
+            # that mode's learned embedding (prefix/perception/masks/position_ids/
+            # block-mask are all reused), and collect one suffix_out per mode for the
+            # winner-take-all planning loss further down.
+            suffix_out_per_mode = [suffix_out]
+            if self.num_modes > 1:
+                suffix_out_per_mode = []
+                for _n in range(self.num_modes):
+                    _mode_idx = torch.full((bsz,), _n, dtype=torch.long, device=actions.device)
+                    _suffix_n, _, _ = self.embed_suffix(
+                        batch, x_t, time, ego_status_pred=None, use_gt_status=True,
+                        hist_traj=hist_traj, mode_idx=_mode_idx,
+                    )
+                    if self.qwen3_vl_with_expert.qwen3_vl.language_model.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
+                        _suffix_n = _suffix_n.to(dtype=torch.bfloat16)
+                    (_outs_n, _unused_n) = self._apply_checkpoint(
+                        forward_func,
+                        prefix_embs,
+                        perception_embs,
+                        _suffix_n,
+                        att_mask_input,
+                        position_ids,
+                        None,
+                        q_len_rounded,
+                        _ds_embeds,
+                        _visual_pos_masks,
+                    )
+                    suffix_out_per_mode.append(_outs_n[2])
+                suffix_out = suffix_out_per_mode[0]
 
         loss_traj_ar = prefix_embs.sum() * 0.0
         if self.enable_traj_ar and self.train_vlm and batch.traj_labels is not None:
@@ -1486,13 +1587,54 @@ class QwenVL3APlanningHead(nn.Module):
         pred_x_gt = x_t.to(dtype=torch.float32) - t_exp * model_out
 
         if self.loss_planning is not None:
-            _pred_x0_norm = x_t.to(dtype=torch.float32) - t_exp * model_out
-            planning_loss = self.loss_planning(
-                model_out, u_t, time,
-                gt_ego_fut_masks=gt_ego_fut_masks,
-                pred_x0=_pred_x0_norm,
-                gt_x0=actions,
-            )
+            if self.num_modes > 1 and suffix_out_per_mode is not None:
+                # Winner-take-all over modes. FlowPlanningLoss reduces over the whole
+                # batch, so to get a per-(sample, mode) loss we call it on batch-1
+                # slices. Per sample we keep only the minimum loss across modes (the
+                # "winner"), so the gradient flows only to the closest-to-GT mode and
+                # modes specialize instead of collapsing; we then average over the batch.
+                _mode_loss_rows = []   # over modes: (B,) loss
+                _mode_endpoints = []   # over modes: (B, 2) predicted endpoint (meters), for divergence diag
+                for _suffix_out_n in suffix_out_per_mode:
+                    _so_n = _suffix_out_n[:, -self.action_horizon:].to(dtype=torch.float32)
+                    _model_out_n = self._apply_checkpoint(self.action_out_proj, _so_n)
+                    _pred_x0_n = x_t.to(dtype=torch.float32) - t_exp * _model_out_n
+                    _per_sample = []
+                    for _b in range(bsz):
+                        _m_b = gt_ego_fut_masks[_b:_b + 1] if gt_ego_fut_masks is not None else None
+                        _l_b = self.loss_planning(
+                            _model_out_n[_b:_b + 1], u_t[_b:_b + 1], time[_b:_b + 1],
+                            gt_ego_fut_masks=_m_b,
+                            pred_x0=_pred_x0_n[_b:_b + 1],
+                            gt_x0=actions[_b:_b + 1],
+                        )
+                        _per_sample.append(_l_b)
+                    _mode_loss_rows.append(torch.stack(_per_sample))  # (B,)
+                    _ep_n = torch.cumsum(self.denorm_delta(_pred_x0_n[..., :2]), dim=1)[:, -1, :]
+                    _mode_endpoints.append(_ep_n.detach())
+
+                _L = torch.stack(_mode_loss_rows, dim=1)              # (B, N)
+                _wta = _L.min(dim=1).values.mean()
+                if self.mode_eps_share > 0.0:
+                    planning_loss = (1.0 - self.mode_eps_share) * _wta + self.mode_eps_share * _L.mean()
+                else:
+                    planning_loss = _wta
+
+                # Diagnostics (no 'loss' in the name -> logged but NOT summed into the
+                # total loss). mode_endpoint_std is the go/no-go signal for Increment 2:
+                # it should grow well above the ~0.1 m noise-only diversity as modes diverge.
+                _eps_stack = torch.stack(_mode_endpoints, dim=1)     # (B, N, 2)
+                stats["mode_endpoint_std"] = _eps_stack.std(dim=1).mean().detach()
+                stats["mode_winner_min"] = _L.min(dim=1).values.mean().detach()
+                stats["mode_mean_all"] = _L.mean().detach()
+            else:
+                _pred_x0_norm = x_t.to(dtype=torch.float32) - t_exp * model_out
+                planning_loss = self.loss_planning(
+                    model_out, u_t, time,
+                    gt_ego_fut_masks=gt_ego_fut_masks,
+                    pred_x0=_pred_x0_norm,
+                    gt_x0=actions,
+                )
         else:
             planning_loss = torch.tensor(0.0, device=model_out.device)
 
@@ -1586,6 +1728,8 @@ class QwenVL3APlanningHead(nn.Module):
         noise: Optional[torch.Tensor] = None,
         hist_traj=None,
         use_gt_ego_status: bool = False,
+        return_all_modes: bool = False,
+        return_scene_tokens: bool = False,
         **kwargs,
     ):
         permute_indices = [0, 2, 1, 4, 5, 3]
@@ -1613,7 +1757,7 @@ class QwenVL3APlanningHead(nn.Module):
         if noise is None:
             noise = self.sample_noise((bsz, self.action_horizon, self.action_dim), device)
 
-        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = "flash_attention_2"
+        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = self._visual_attn_impl
 
         prefix_embs, prefix_pad_masks, prefix_att_masks, all_image_grids, prefix_input_ids, deepstack_features, raw_features, prompt_only_len = self.embed_prefix(batch)
 
@@ -1710,6 +1854,7 @@ class QwenVL3APlanningHead(nn.Module):
         t1 = t0 + motion_len
 
         stage2_outs = None
+        scene_tokens = None
 
         if perception_out is not None:
             det_out_vlm = perception_out[:, d0:d1]
@@ -1725,6 +1870,8 @@ class QwenVL3APlanningHead(nn.Module):
 
             det_feat_fused = self.det_proj(det_out_vlm.to(proj_dtype)).to(torch.float32)
             map_feat_fused = self.map_proj(map_out_vlm.to(proj_dtype)).to(torch.float32)
+            if return_scene_tokens:
+                scene_tokens = torch.cat([det_feat_fused, map_feat_fused], dim=1).detach()
             ego_feat_fused = (
                 self.ego_proj_down(ego_out.to(proj_dtype)).to(torch.float32)
                 if ego_out is not None
@@ -1756,41 +1903,72 @@ class QwenVL3APlanningHead(nn.Module):
         dt_val = -1.0 / num_steps
         dt_val = torch.tensor(dt_val, dtype=torch.float32, device=device)
 
-        x_t = noise
-        time_tensor = torch.tensor(1.0, dtype=torch.float32, device=device)
-
         if use_gt_ego_status:
             ego_status_pred = None
         elif stage2_outs and 'ego_status_list' in stage2_outs and len(stage2_outs['ego_status_list']) > 0:
             ego_status_pred = stage2_outs['ego_status_list'][-1].squeeze(1).to(torch.float32)
         else:
-            ego_status_pred = x_t.new_zeros((bsz, self.ego_status_dim), dtype=torch.float32)
+            ego_status_pred = noise.new_zeros((bsz, self.ego_status_dim), dtype=torch.float32)
 
         if perception_len > 0:
             max_perception_pos = perception_pos_ids_1d.max(dim=-1, keepdim=True).values
         else:
             max_perception_pos = max_prefix_pos
 
-        while time_tensor >= -dt_val / 2:
-            expanded_time = time_tensor.expand(bsz)
-            v_t = self._denoise_step(
-                batch, cached_pad_masks, past_key_values, x_t.to(dtype), expanded_time.to(dtype),
-                max_perception_pos, ego_status_pred=ego_status_pred, use_gt_status=use_gt_ego_status, hist_traj=hist_traj,
+        # DynamicCache.update() runs unconditionally inside Qwen3VL attention,
+        # so each _denoise_step appends; crop back to the prefix after every step.
+        initial_cache_len = past_key_values.get_seq_length()
+
+        # Increment 2: one denoise loop per mode. The cached prefix+perception KV is
+        # reused across modes (each step crops the cache back to initial_cache_len),
+        # so the per-mode cost is just the (cheap) suffix denoise. mode_idx threads
+        # into embed_suffix -> the per-mode learned embedding -> a distinct trajectory.
+        def _run_denoise(mode_idx):
+            x_t = noise
+            time_tensor = torch.tensor(1.0, dtype=torch.float32, device=device)
+            while time_tensor >= -dt_val / 2:
+                expanded_time = time_tensor.expand(bsz)
+                v_t = self._denoise_step(
+                    batch, cached_pad_masks, past_key_values, x_t.to(dtype), expanded_time.to(dtype),
+                    max_perception_pos, ego_status_pred=ego_status_pred, use_gt_status=use_gt_ego_status,
+                    hist_traj=hist_traj, mode_idx=mode_idx,
+                )
+                past_key_values.crop(initial_cache_len)
+                x_t = x_t + dt_val * v_t
+                time_tensor = time_tensor + dt_val
+            deltas = self.denorm_delta(x_t)
+            zeros = torch.zeros((bsz, 1, 2), device=device, dtype=x_t.dtype)
+            return zeros + torch.cumsum(deltas, dim=1)  # (B, action_horizon, 2)
+
+        traj_modes = None
+        if self.num_modes > 1 and return_all_modes:
+            _mode_trajs = [
+                _run_denoise(torch.full((bsz,), _n, dtype=torch.long, device=device))
+                for _n in range(self.num_modes)
+            ]
+            traj_modes = torch.stack(_mode_trajs, dim=1)   # (B, N, action_horizon, 2)
+            traj_pred_points_meter = traj_modes[:, 0]
+        else:
+            # Single trajectory: mode 0 when multi-mode (keeps nuScenes L2 eval cheap
+            # and shape-compatible), else the plain no-mode path.
+            _single_mode_idx = (
+                torch.zeros((bsz,), dtype=torch.long, device=device)
+                if self.num_modes > 1 else None
             )
-            x_t = x_t + dt_val * v_t
-            time_tensor += dt_val
+            traj_pred_points_meter = _run_denoise(_single_mode_idx)
 
-        traj_pred_meter_deltas = self.denorm_delta(x_t)
-        zeros = torch.zeros((bsz, 1, 2), device=device, dtype=x_t.dtype)
-        traj_pred_points_meter = zeros + torch.cumsum(traj_pred_meter_deltas, dim=1)
-
-        return {
+        out = {
             "traj": traj_pred_points_meter,
             "det": det_result,
             "map": map_result,
         }
+        if traj_modes is not None:
+            out["traj_modes"] = traj_modes
+        if scene_tokens is not None:
+            out["scene_tokens"] = scene_tokens
+        return out
 
-    def _denoise_step(self, batch, cached_pad_masks, past_key_values, x_t, timestep, max_cached_position_ids, *, ego_status_pred: Optional[torch.Tensor] = None, use_gt_status: bool = False, hist_traj=None):
+    def _denoise_step(self, batch, cached_pad_masks, past_key_values, x_t, timestep, max_cached_position_ids, *, ego_status_pred: Optional[torch.Tensor] = None, use_gt_status: bool = False, hist_traj=None, mode_idx: Optional[torch.Tensor] = None):
 
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
             batch,
@@ -1799,6 +1977,7 @@ class QwenVL3APlanningHead(nn.Module):
             ego_status_pred=ego_status_pred,
             use_gt_status=use_gt_status,
             hist_traj=hist_traj,
+            mode_idx=mode_idx,
         )
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -1880,7 +2059,7 @@ class QwenVL3APlanningHead(nn.Module):
         )
 
         self.qwen3_vl_with_expert.qwen3_vl.language_model.config._attn_implementation = "flash_attention_2"
-        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = "flash_attention_2"
+        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = self._visual_attn_impl
 
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             outputs = self.qwen3_vl_with_expert.qwen3_vl(
@@ -1894,7 +2073,7 @@ class QwenVL3APlanningHead(nn.Module):
             )
 
         self.qwen3_vl_with_expert.qwen3_vl.language_model.config._attn_implementation = "flash_attention_2"
-        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = "flash_attention_2"
+        self.qwen3_vl_with_expert.qwen3_vl.visual.config._attn_implementation = self._visual_attn_impl
         loss_vlm = outputs.loss
 
         return dict(

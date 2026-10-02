@@ -1,0 +1,47 @@
+% Five-fold cross-validation of the scorer on navhard, and why variants of one real scene leak.
+\begin{figure}[!htb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,>=Stealth]
+  % ---------------- (a) folds ----------------
+  \node[anchor=west,font=\small\bfseries] at (-1.0,1.6) {(a) Five scorers, five groups};
+  \node at (2.7,0.95) {group};
+  \foreach \c in {1,...,5} \node at (\c*0.9,0.5) {\c};
+  \foreach \r in {1,...,5}{
+    \node[anchor=east] at (0.4,{-(\r-1)*0.55}) {scorer \r};
+    \foreach \c in {1,...,5}{
+      \ifnum\r=\c
+        \fill[orange!70] ({\c*0.9-0.4},{-(\r-1)*0.55-0.22}) rectangle ({\c*0.9+0.4},{-(\r-1)*0.55+0.22});
+      \else
+        \fill[blue!25] ({\c*0.9-0.4},{-(\r-1)*0.55-0.22}) rectangle ({\c*0.9+0.4},{-(\r-1)*0.55+0.22});
+      \fi
+    }
+  }
+  \fill[blue!25] (0.5,-2.95) rectangle (0.8,-2.7); \node[anchor=west] at (0.85,-2.82) {used for training};
+  \fill[orange!70] (0.5,-3.45) rectangle (0.8,-3.2); \node[anchor=west] at (0.85,-3.32) {candidates selected};
+  % ---------------- (b) leakage ----------------
+  \begin{scope}[xshift=7.6cm]
+    \node[anchor=west,font=\small\bfseries] at (-0.6,1.6) {(b) Variants of one real scene};
+    \node[draw,rounded corners,fill=gray!12,align=center] (r) at (0.6,-1.0) {one real\\scene};
+    \foreach \i/\g [count=\k] in {1/1,2/3,3/5,4/2,5/1,6/4,7/3,8/2,9/5,10/4,11/1,12/3}{
+      \pgfmathsetmacro\ang{90-(\k-1)*30}
+      \ifnum\g=3
+        \fill[orange!70] ($(3.5,-1.0)+(\ang:1.15)$) circle (0.17);
+      \else
+        \fill[blue!25] ($(3.5,-1.0)+(\ang:1.15)$) circle (0.17);
+      \fi
+      \node[font=\scriptsize] at ($(3.5,-1.0)+(\ang:1.15)$) {\g};
+    }
+    \draw[->,thick] (r.east) -- (2.15,-1.0);
+    \node[align=center] at (3.5,-1.0) {synthetic\\variants};
+    \node[align=left,anchor=west] at (5.0,-0.4) {numbers: group of\\each variant};
+    \node[align=left,anchor=west] at (5.0,-1.7) {evaluating group 3, the\\scorer has seen the\\other variants};
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption[Cross-validation of the scorer on navhard]{\textbf{Cross-validation of the scorer on
+navhard.} (a) Each of five scorers is trained on four groups and selects the candidates in the
+remaining group. (b) The groups are formed at random over all scenes, so the synthetic variants
+of one real scene fall into different groups.}
+\label{fig:cv}
+\end{figure}

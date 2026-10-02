@@ -1,0 +1,55 @@
+% Conversion to NAVSIM, drawn on an example left turn: model frame (lateral, forward) on the
+% left; NAVSIM frame (x forward, y left) with the two extended positions and headings on the right.
+\begin{figure}[tb]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\small,>=Stealth,x=0.42cm,y=0.24cm]
+% ---------------- left panel: UniDriveVLA output ----------------
+\begin{scope}
+  \draw[->,thick] (0,0) -- (0,18) node[above,font=\footnotesize] {forward $f$ (m)};
+  \draw[->,thick] (-7,0) -- (2.5,0) node[right,font=\footnotesize] {lateral $\ell$};
+  \foreach \yy in {4,8,12} \draw (-0.15,\yy) -- (0.15,\yy) node[right,font=\scriptsize] {\yy};
+  \foreach \xx in {-6,-3} \draw (\xx,-0.25) -- (\xx,0.25) node[below=2pt,font=\scriptsize] {\xx};
+  \fill[black] (0,0) circle (3pt);
+  \draw[blue!70!black,thick] (0,0) -- (-0.1,2) -- (-0.4,4) -- (-0.9,6) -- (-1.6,8) -- (-2.5,10) -- (-3.6,12);
+  \foreach \p in {(-0.1,2),(-0.4,4),(-0.9,6),(-1.6,8),(-2.5,10),(-3.6,12)}
+    \fill[blue!70!black] \p circle (3.2pt);
+  \node[font=\footnotesize,align=center] at (-2.5,-4.2) {UniDriveVLA output:\\6 positions $(\ell_k,f_k)$, \SI{3}{\second}};
+\end{scope}
+% arrow between panels
+\draw[->,very thick] (3.6,8) -- node[above,font=\footnotesize,align=center]{$x=f$\\$y=-\ell$} (8.6,8);
+% ---------------- right panel: NAVSIM poses ----------------
+\begin{scope}[xshift=7.6cm]
+  \draw[->,thick] (0,0) -- (0,18) node[above,font=\footnotesize] {$x$ (m)};
+  \draw[->,thick] (2.5,0) -- (-7,0) node[left,font=\footnotesize] {$y$};
+  \foreach \yy in {4,8,12,16} \draw (-0.15,\yy) -- (0.15,\yy) node[right,font=\scriptsize] {\yy};
+  \foreach \xx/\lab in {-3/3,-6/6} \draw (\xx,-0.25) -- (\xx,0.25) node[below=2pt,font=\scriptsize] {\lab};
+  \fill[black] (0,0) circle (3pt);
+  \draw[blue!70!black,thick] (0,0) -- (-0.1,2) -- (-0.4,4) -- (-0.9,6) -- (-1.6,8) -- (-2.5,10) -- (-3.6,12);
+  \draw[orange!85!black,thick,dashed] (-3.6,12) -- (-4.7,14) -- (-5.8,16);
+  \foreach \p in {(-0.1,2),(-0.4,4),(-0.9,6),(-1.6,8),(-2.5,10),(-3.6,12)}
+    \fill[blue!70!black] \p circle (3.2pt);
+  \foreach \p in {(-4.7,14),(-5.8,16)}
+    \draw[orange!85!black,fill=white,thick] \p circle (3.2pt);
+  % headings: direction of the displacement leading to each pose
+  \coordinate (q0) at (0,0);    \coordinate (q1) at (-0.1,2); \coordinate (q2) at (-0.4,4);
+  \coordinate (q3) at (-0.9,6); \coordinate (q4) at (-1.6,8); \coordinate (q5) at (-2.5,10);
+  \coordinate (q6) at (-3.6,12);\coordinate (q7) at (-4.7,14);\coordinate (q8) at (-5.8,16);
+  \foreach \k [evaluate=\k as \km using int(\k-1)] in {1,...,8}
+    \draw[->,red!70!black,semithick] (q\k) -- ($(q\k)+0.7*(q\k)-0.7*(q\km)$);
+  \node[font=\footnotesize,align=center] at (-2.5,-4.2) {NAVSIM: 8 poses $(x_k,y_k,\theta_k)$, \SI{4}{\second}};
+\end{scope}
+% legend
+\begin{scope}[xshift=10.6cm,yshift=0.3cm]
+  \fill[blue!70!black] (0,12) circle (3.2pt); \node[anchor=west,font=\scriptsize] at (0.5,12) {predicted position};
+  \draw[orange!85!black,fill=white,thick] (0,9.5) circle (3.2pt); \node[anchor=west,font=\scriptsize,align=left] at (0.5,9.5) {extended with the\\last displacement};
+  \draw[->,red!70!black,thick] (-0.3,6.5) -- (0.4,7.6); \node[anchor=west,font=\scriptsize,align=left] at (0.7,7) {heading $\theta_k$};
+\end{scope}
+\end{tikzpicture}%
+}
+\caption[Conversion to NAVSIM]{\textbf{Conversion to NAVSIM}, shown for a left turn. The model
+measures the lateral coordinate to the right, NAVSIM measures $y$ to the left; both panels
+show the same path. The six predicted positions are extended to eight by repeating the last
+displacement, and each pose receives the heading of the displacement that leads to it.}
+\label{fig:outconv}
+\end{figure}

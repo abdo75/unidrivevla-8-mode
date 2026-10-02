@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from packaging import version as pkg_version
+import os
 import torch.distributed as dist
 import mmcv
 import torch
@@ -89,11 +90,14 @@ def build_ZeROddp(model, optimizer=None, model_parameters=None, device='cuda', a
 
     # ================= 步骤 1: 确保 DeepSpeed 后端初始化 =================
     # 这一步非常重要，确保 deepspeed.comm 能读到 world_size=8
+    # DIST_BACKEND lets a single-GPU cloud run use gloo: NCCL 2.26 (torch 2.7/cu128)
+    # segfaults on some virtualized A100s at the first broadcast (see finetune script).
+    _dist_backend = os.environ.get("DIST_BACKEND", "nccl")
     if dist.is_initialized():
-        deepspeed.init_distributed(dist_backend='nccl', auto_mpi_discovery=False)
+        deepspeed.init_distributed(dist_backend=_dist_backend, auto_mpi_discovery=False)
     else:
         # 如果连 torch dist 都没初始化，尝试补救 (通常不会走到这，因为你有 --launcher pytorch)
-        deepspeed.init_distributed(dist_backend='nccl')
+        deepspeed.init_distributed(dist_backend=_dist_backend)
 
     # ================= 步骤 2: 计算正确的 Batch Size (128) =================
     

@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from mmdet.models import DETECTORS
@@ -178,6 +179,11 @@ class UniDriveVLA(BaseDetector):
 
         img_metas = kwargs.get('img_metas', [{}])
 
+        # EVAL_RETURN_MODES=1 makes the standard mmcv test loop emit all N candidate
+        # trajectories (traj_modes) without threading return_all_modes through the loop,
+        # so the minADE_k / minFDE_k planning eval works via eval_stage2_2b unchanged.
+        if os.environ.get("EVAL_RETURN_MODES", "0") == "1":
+            kwargs.setdefault("return_all_modes", True)
 
         pred = self.planning_head.forward_test(
             img=img_last,
@@ -202,6 +208,11 @@ class UniDriveVLA(BaseDetector):
 
         if isinstance(pred, dict) and ("det" in pred or "map" in pred):
             traj = pred.get("planning", pred.get("traj"))
+            # Increment 2 / Stage B: when forward_test was called with
+            # return_all_modes=True the planning head also returns the N candidate
+            # trajectories (B, N, T, 2). Surface them per-sample so the candidate-dump
+            # / PDMS-scoring pipeline can read them; absent otherwise (no behavior change).
+            traj_modes = pred.get("traj_modes") if isinstance(pred, dict) else None
 
             det_list = pred.get("det")
             map_list = pred.get("map")
@@ -235,6 +246,16 @@ class UniDriveVLA(BaseDetector):
                     img_bbox["final_planning"] = traj.detach().cpu()[i]
                 elif traj is not None:
                     img_bbox["final_planning"] = traj
+
+                if torch.is_tensor(traj_modes) and traj_modes.dim() == 4 and i < traj_modes.shape[0]:
+                    img_bbox["traj_modes"] = traj_modes.detach().cpu()[i]  # (N, T, 2)
+
+                # Increment 3 / scorer data-gen: when forward_test was called with
+                # return_scene_tokens=True the head also returns the per-scene perception
+                # tokens (B, T_s, C); surface them per-sample for the phi_s dump.
+                _st = pred.get("scene_tokens") if isinstance(pred, dict) else None
+                if torch.is_tensor(_st) and i < _st.shape[0]:
+                    img_bbox["scene_tokens"] = _st.detach().cpu()[i]  # (T_s, C)
 
                 outputs.append({"img_bbox": img_bbox})
 

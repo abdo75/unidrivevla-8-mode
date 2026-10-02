@@ -102,9 +102,11 @@ class NuScenes3DDataset(Dataset):
         work_dir=None,
         eval_config=None,
         vad_ann_file=None,
+        max_samples=None,
     ):
         self.version = version
         self.load_interval = load_interval
+        self.max_samples = max_samples
         self.use_valid_flag = use_valid_flag
         super().__init__()
         self.data_root = data_root
@@ -119,6 +121,12 @@ class NuScenes3DDataset(Dataset):
             self.MAP_CLASSES = map_classes
         self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
         self.data_infos = self.load_annotations(self.ann_file)
+
+        # Overfit/debug: truncate to the first N samples. VAD infos are looked up by
+        # token (a map, below), so truncating data_infos stays consistent. Done BEFORE
+        # the sequence-group flag (which uses len(data_infos)). None = no change.
+        if self.max_samples is not None:
+            self.data_infos = self.data_infos[: self.max_samples]
 
         # Load VAD annotations for historical trajectory
         if vad_ann_file is None:
@@ -440,6 +448,12 @@ class NuScenes3DDataset(Dataset):
             cur_scene_token = info["scene_token"]
             cur_T_global = get_T_global(info)
             for i in range(1, fut_ts + 1):
+                # Stop if the future frame runs past the end of data_infos. Normally
+                # frames near a scene end have gt_ego_fut_masks.sum()==0 so this loop
+                # is short; but max_samples truncation can cut mid-scene, leaving a
+                # non-zero fut horizon with no frames on disk -> treat as a boundary.
+                if index + i >= len(self.data_infos):
+                    break
                 fut_info = self.data_infos[index + i]
                 fut_scene_token = fut_info["scene_token"]
                 if cur_scene_token != fut_scene_token:
